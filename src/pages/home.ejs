@@ -2,17 +2,40 @@
 <html>
 	<head>
 		<title>Home Page</title>
-
-		<style type="text/css" media="screen">
-			body {
-				background-color: skyblue;
-				text-decoration-color: white;
-				font-size: 7em;
-			}
-		</style>
+		<link rel="stylesheet" href="/home.css">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	</head>
-
 	<body>
-		<center>This is our home page.</center>
+		<div class='background'></div>
+		<div class='container'>
+			<div class='inner'>
+					<div class="login-form">
+						<span class="title-text">Sign In</span>
+						<form>
+							<p class="field">
+								<input
+									type="text"
+									name="username"
+									placeholder="Username"
+									required
+								/>
+								<label for="username">Username</label>
+							</p>
+							<p class="field">
+								<input type="password" placeholder="Password" required />
+								<label for="password">Password</label>
+							</p>
+							<p>
+								<input class="btn" type="submit" value="Next" />
+							</p>
+							<p class='bottom-grid'>
+								<a href="">Reset password?</a>
+								<a href="">No Account? Create one!</a>
+							</p>
+						</form>
+					</div>
+				</div>
+			</div>
+		</div>
 	</body>
 </html>

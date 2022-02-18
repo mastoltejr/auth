@@ -1,135 +1,206 @@
 import express, { Application, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import { createClient, RedisClient } from 'redis';
-import {
-	createConnection,
-	MysqlError,
-	Connection as MysqlConnection
-} from 'mysql';
 import { genSalt, hash, compare } from 'bcrypt';
 import { promisify } from 'util';
 import dotenv from 'dotenv';
 import { join } from 'path';
+import {
+  combine,
+  isEmail,
+  anyErrors,
+  isUnique,
+  matching,
+  required,
+  strongPassword
+} from './validation';
+import { PrismaClient } from '@prisma/client';
+const prisma = new PrismaClient();
 dotenv.config();
 
 let redis: RedisClient;
-let mysql: MysqlConnection;
 
 redis = createClient(6379, process.env['REDIS_HOST'], {
-	password: process.env['REDIS_PWD'],
-	db: process.env['REDIS_DB']
+  password: process.env['REDIS_PWD'],
+  db: process.env['REDIS_DB']
 });
 
 redis.on('connection', () => console.log('Redis is connected'));
 redis.on('error', (err) => {
-	console.log('Redis errored out', err);
-	process.exit();
+  console.log('Redis errored out', err);
+  process.exit();
 });
-
-mysql = createConnection({
-	host: String(process.env['MYSQL_HOST']),
-	port: +String(process.env['MYSQL_PORT']),
-	database: String(process.env['MYSQL_DB']),
-	user: String(process.env['MYSQL_USER']),
-	password: String(process.env['MYSQL_PASSWORD'])
-});
-
-mysql.connect((err: MysqlError) => {
-	if (err) {
-		console.log('Mysql errored out', err);
-		process.exit();
-	} else {
-		console.log('Mysql is connected');
-	}
-});
-
-mysql.query(
-	"SELECT * FROM information_schema.tables WHERE table_schema = ? AND table_name = 'AUTH_USERS'",
-	[String(process.env['MYSQL_DB'])],
-	(_, results, __) => {
-		if (results.length === 0) {
-			mysql.query(`CREATE TABLE auth.AUTH_USERS(
-							id INT NOT NULL AUTO_INCREMENT,
-							username VARCHAR(256) NOT NULL,
-							password BINARY(60) NOT NULL,
-							firstName VARCHAR(35),
-							lastName VARCHAR(35),
-							email VARCHAR(256) NOT NULL,
-							birthday DATE,
-							creationDate TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-							lastAccessDate TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-							active BOOLEAN DEFAULT TRUE,
-							PRIMARY KEY (id)
-						)`);
-		} else {
-			console.log('Mysql: AUTH_USERS exists');
-		}
-	}
-);
 
 const asyncMiddleware =
-	(fn: (req: Request, res: Response, next: NextFunction) => Promise<any>) =>
-	(req: Request, res: Response, next: NextFunction) => {
-		Promise.resolve(fn(req, res, next)).catch(next);
-	};
+  (fn: (req: Request, res: Response, next: NextFunction) => Promise<any>) =>
+  (req: Request, res: Response, next: NextFunction) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+  };
 
-let query = promisify(mysql.query).bind(mysql);
 const app: Application = express();
 
+app.use(
+  express.urlencoded({
+    extended: true
+  })
+);
 app.use(express.json());
 app.set('view engine', 'ejs');
 app.set('views', join(__dirname, '/pages'));
-
-app.put(
-	'/user/register',
-	cors,
-	asyncMiddleware(async (req, res, next) => {
-		const { username, password, email } = req.body;
-		const body = req.body;
-
-		if (!(username && password && email)) {
-			return res.status(400).send({ error: 'Data not formatted properly' });
-		}
-
-		let results = await query({
-			sql: 'SELECT ID FROM AUTH_USERS WHERE username = :username',
-			values: {
-				username,
-				email
-			}
-		});
-		if ((results as any[]).length > 0) {
-			return res.status(400).send({ error: 'Non-unique username' });
-		}
-
-		results = await query({
-			sql: 'SELECT ID FROM AUTH_USERS WHERE email = :email',
-			values: {
-				username,
-				email
-			}
-		});
-		if ((results as any[]).length > 0) {
-			return res.status(400).send({ error: 'Non-unique email' });
-		}
-
-		// creating a new mongoose doc from user data
-		//const user = new User(body);
-		// generate salt to hash password
-		//const salt = await bcrypt.genSalt(10);
-		// now we set user password to hashed password
-		//user.password = await bcrypt.hash(user.password, salt);
-		//user.save().then((doc) => res.status(201).send(doc));
-	})
-);
+app.use(express.static(__dirname + '/public'));
 
 app.get('/', (req, res) => res.render('home'));
-app.get('/login', (req, res) => res.render('login'));
-app.get('/signup', (req, res) => res.render('signup'));
+
+app.post('/application', async (req, res) => {
+  const {
+    id,
+    clientId,
+    objectId,
+    applicationSecret,
+    ownerId,
+    displayName,
+    inviteOnly,
+    applicationUrl,
+    active,
+    ...application
+  } = req.body;
+
+  let errors = {
+    // email: combine(email, required, isEmail),
+    // password: required(password)
+  };
+});
+
+//TODO verify token middleware
+app.put('/application', async (req, res) => {
+  const { ownerId, displayName } = req.query;
+
+  let errors = {
+    ownerId: required(ownerId),
+    displayName: required(displayName)
+  };
+
+  if (anyErrors(errors)) {
+    res.send(400).send(errors);
+    return;
+  }
+
+  const newApp = await prisma.application.create({
+    data: { ownerId: +ownerId!, displayName: displayName as string }
+  });
+  res.status(201).send(newApp);
+});
+
+app.get('/user/login', (req, res) => {
+  let og = req.query.scope ?? [];
+  const scope = Array.isArray(og) ? (og as string[]) : [String(og)];
+
+  res.render('login', {
+    query: {
+      clientId: req.query.clientId ?? '',
+      scope: scope.join(','),
+      invitation: req.query.invitation ?? ''
+    },
+    errors: {},
+    values: {}
+  });
+});
+
+app.post('/user/login', async (req, res) => {
+  const { email, password } = req.body;
+  let errors = {
+    email: combine(email, required, isEmail),
+    password: required(password)
+  };
+
+  if (anyErrors(errors)) {
+    return res.render('login', { errors, values: { email } });
+  }
+
+  const matchedUser = await prisma.user.findUnique({
+    where: {
+      email
+    }
+  });
+
+  await compare(password, matchedUser?.password ?? '', function (err, success) {
+    if (success) {
+      // TODO send to application url with correct password
+      const now = new Date();
+      matchedUser!.lastAccess = now;
+      prisma.user.update({
+        where: {
+          id: matchedUser?.id
+        },
+        data: {
+          lastAccess: now
+        }
+      });
+      return res.status(200).send(matchedUser);
+    } else {
+      return res.render('login', {
+        errors: { password: 'Incorrect Password' },
+        values: { email }
+      });
+    }
+  });
+});
+
+app.get('/user/signup', (req, res) =>
+  res.render('signup', { errors: {}, values: {} })
+);
+app.post('/user/signup', async (req, res, next) => {
+  const { email, password, password2 } = req.body;
+  let errors = {
+    email: combine(email, required, isEmail),
+    password: combine(password, required, strongPassword),
+    password2: matching(password, password2)
+  };
+
+  if (anyErrors(errors)) {
+    return res.render('signup', { errors, values: { email } });
+  }
+
+  const matchedUser = await prisma.user.findUnique({
+    where: {
+      email
+    }
+  });
+
+  if (!!matchedUser) {
+    return res.status(400).send({
+      email: isUnique(email, [matchedUser.email])
+    });
+  }
+
+  const salt = await genSalt(10);
+  const passwordHash = await hash(password, salt);
+
+  const newUser = await prisma.user.create({
+    data: {
+      email,
+      password: passwordHash
+    }
+  });
+
+  res.render('login', { errors: {}, values: { email: newUser.email } });
+});
+
+app.post('/oauth2/v1/deviceCode', async (req, res) => {
+  const { clientId, scope } = req.body;
+  let errors = {
+    clientId: required(clientId),
+    scope: required(scope)
+  };
+
+  if (anyErrors(errors)) {
+    return res.status(400).send(errors);
+  }
+});
 
 const expressPort = process.env.EXPRESS_PORT || 5000;
 app.listen(expressPort, () =>
-	console.log(`Server running on port ${expressPort}`)
+  console.log(`Server running on port ${expressPort}`)
 );
 
 /*
