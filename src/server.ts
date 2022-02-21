@@ -2,7 +2,8 @@ import express, {
   Request,
   Response,
   NextFunction,
-  Application as ExpressApplication
+  Application as ExpressApplication,
+  RequestHandler
 } from 'express';
 import cors from 'cors';
 import { createClient, RedisClient } from 'redis';
@@ -65,7 +66,45 @@ app.set('view engine', 'ejs');
 app.set('views', join(__dirname, '/pages'));
 app.use(express.static(__dirname + '/public'));
 
-app.get('/', (req, res) => res.render('home'));
+const tokenMiddleware: RequestHandler = async (req, res, next) => {
+  const [authType, bearerToken] = String(req.headers['authorization']).split(
+    ' '
+  );
+  if (authType !== 'Bearer')
+    return res.status(401).send('Auth Token must be a Bearer Token');
+  await redis.get(bearerToken, async (error, value) => {
+    if (error || value === null)
+      return res.status(401).send('Invalid or expired Token');
+    const [tokenType, clientId, applicationSecret] = value.split('|');
+
+    await jwt.verify(
+      bearerToken,
+      tokenType === 'access'
+        ? applicationSecret
+        : String(process.env['AUTH_SECRET']),
+      {
+        issuer: process.env['AUTH_ISSUER'],
+        audience: clientId
+      },
+      (error, payload) => {
+        if (error !== null)
+          return res
+            .status(401)
+            .send({ error: error.name, message: error.message });
+        if (payload === undefined) return res.status(400).send('Invalid Token');
+
+        req.body['authTokenPayload'] = payload;
+        next();
+      }
+    );
+  });
+};
+
+app.post('/tokenTest', tokenMiddleware, (req, res) => {
+  res.status(200).send(req.body);
+});
+
+app.get('/', (req, res, next) => res.render('home'));
 
 //TODO verify token middleware
 app.get('/application', async (req, res) => {
@@ -383,12 +422,13 @@ interface TokenRequest extends Request {
 
 type SlimUser = Partial<User> & {
   oid: User['uuid'];
-  scopes: Array<Pick<ApplicationScopes, 'id' | 'scope'>>;
 };
 
-interface TokenPayload {
-  clientId: string;
-  user: SlimUser;
+interface TokenPayload extends SlimUser {
+  iat: number;
+  exp: number;
+  iss: string;
+  aud: string;
 }
 
 app.post('/oauth2/v1/token', async (req: TokenRequest, res) => {
@@ -404,7 +444,7 @@ app.post('/oauth2/v1/token', async (req: TokenRequest, res) => {
 
   redis.get(String(deviceCode), async (error, userCode) => {
     if (error) return res.status(400).send('Could not fetch data');
-    console.log('userCode', userCode);
+
     if (!!!userCode) return res.status(200).send('expired_token');
 
     redis.get(`${userCode}-status`, async (error, status) => {
@@ -417,7 +457,7 @@ app.post('/oauth2/v1/token', async (req: TokenRequest, res) => {
 
       redis.get(userCode, async (error, oid) => {
         if (error) return res.status(400).send('Could not fetch data');
-        console.log('oid', oid);
+
         const user = await prisma.user.findUnique({
           where: { uuid: String(oid) },
           include: {
@@ -442,14 +482,8 @@ app.post('/oauth2/v1/token', async (req: TokenRequest, res) => {
           return res.status(200).send('expired_token');
         }
 
-        console.log(user);
-
         const slimUser = user?.scopes.reduce<SlimUser>(
           (obj, s) => {
-            obj.scopes.push({
-              id: s.applicationScope.id,
-              scope: s.applicationScope.scope
-            });
             const base = s.applicationScope.scope.substring(
               0,
               s.applicationScope.scope.indexOf('_')
@@ -493,10 +527,9 @@ app.post('/oauth2/v1/token', async (req: TokenRequest, res) => {
             }
             return obj;
           },
-          { oid: user.uuid, scopes: [] }
+          { oid: user.uuid }
         );
 
-        console.log('slimUser', slimUser);
         const application = await prisma.application.findUnique({
           where: { clientId },
           select: {
@@ -506,36 +539,40 @@ app.post('/oauth2/v1/token', async (req: TokenRequest, res) => {
           }
         });
         if (!!application) {
-          const { applicationSecret, objectId, scopes } = application;
+          const { applicationSecret, scopes } = application;
 
-          const accessToken = jwt.sign(
-            { clientId, user: slimUser },
-            applicationSecret,
-            {
-              issuer: 'https://auth.stolte.us',
-              expiresIn: '1h',
-              audience: clientId
-            }
+          const accessToken = jwt.sign(slimUser, applicationSecret, {
+            issuer: process.env['AUTH_ISSUER'],
+            expiresIn: '1h',
+            audience: clientId
+          });
+
+          redis.setex(
+            accessToken,
+            3600,
+            `access|${clientId}|${applicationSecret}`
           );
 
-          redis.setex(accessToken, 3600, '1');
-
           const refreshToken = jwt.sign(
-            { clientId, user: slimUser },
+            slimUser,
             String(process.env['AUTH_SECRET']),
             {
-              issuer: 'https://auth.stolte.us',
+              issuer: process.env['AUTH_ISSUER'],
               expiresIn: '6h',
               audience: clientId
             }
           );
 
-          redis.setex(refreshToken, 3600 * 6, '1');
+          redis.setex(
+            refreshToken,
+            3600 * 6,
+            `refresh|${clientId}|${applicationSecret}`
+          );
           redis.del(String(deviceCode));
 
           return res.status(200).send({
             tokenType: 'Bearer',
-            scopes,
+            scopes: scopes.map((s) => s.scope),
             expiryDate: addHours(new Date(), 1),
             oid,
             accessToken,
@@ -552,10 +589,9 @@ interface RefreshRequest extends Request {
 }
 
 app.post('/oauth2/v1/refresh', async (req: RefreshRequest, res) => {
-  const { clientId, refreshToken } = req.body;
+  const { refreshToken } = req.body;
 
   let errors = {
-    clientId: required(clientId),
     refreshToken: required(refreshToken)
   };
 
@@ -563,66 +599,76 @@ app.post('/oauth2/v1/refresh', async (req: RefreshRequest, res) => {
     return res.status(400).send(errors);
   }
 
-  const application = await prisma.application.findUnique({
-    where: { clientId }
-  });
+  redis.get(refreshToken, async (error, value) => {
+    if (error) return res.status(400).send('Could not fetch data');
+    if (value === null) return res.status(200).send('Token has been revoked');
+    const [tokenType, clientId, applicationSecret] = value.split('|');
 
-  if (!!!application) return res.status(200).send('Invalid Application');
+    if (tokenType !== 'refresh')
+      return res.status(400).send('Not a refresh token');
 
-  jwt.verify(
-    refreshToken,
-    String(process.env['AUTH_SECRET']),
-    {
-      issuer: 'https://auth.stolte.us',
-      audience: clientId
-    },
-    (error, payload) => {
-      if (error !== null)
-        return res
-          .status(401)
-          .send({ error: error.name, message: error.message });
-      if (payload === undefined) return res.status(400).send('Invalid Token');
-      const body = payload as TokenPayload;
-      if (body.clientId !== clientId)
-        return res.status(400).send('Incorrect Application');
+    jwt.verify(
+      refreshToken,
+      String(process.env['AUTH_SECRET']),
+      {
+        issuer: process.env['AUTH_ISSUER'],
+        audience: clientId
+      },
+      async (error, payload) => {
+        if (error !== null)
+          return res
+            .status(401)
+            .send({ error: error.name, message: error.message });
+        if (payload === undefined) return res.status(400).send('Invalid Token');
+        const body = payload as TokenPayload;
+        if (body.aud !== clientId)
+          return res.status(400).send('Incorrect Application');
 
-      redis.get(refreshToken, async (error, value) => {
-        if (error) return res.status(400).send('Could not fetch data');
-        if (value !== '1')
-          return res.status(200).send('Token has been revoked');
+        const application = await prisma.application.findUnique({
+          where: { clientId },
+          include: { scopes: true }
+        });
 
-        const newAccessToken = jwt.sign(body, application.applicationSecret, {
-          issuer: 'https://auth.stolte.us',
+        const newAccessToken = jwt.sign(body, applicationSecret, {
+          issuer: process.env['AUTH_ISSUER'],
           expiresIn: '1h',
           audience: clientId
         });
 
-        redis.setex(newAccessToken, 3600, '1');
+        redis.setex(
+          newAccessToken,
+          3600,
+          `access|${clientId}|${applicationSecret}`
+        );
 
         const newRefreshToken = jwt.sign(
           body,
           String(process.env['AUTH_SECRET']),
           {
-            issuer: 'https://auth.stolte.us',
+            issuer: process.env['AUTH_ISSUER'],
             expiresIn: '6h',
             audience: clientId
           }
         );
 
-        redis.setex(newRefreshToken, 3600 * 6, '1');
+        redis.setex(
+          newRefreshToken,
+          3600 * 6,
+          `refresh|${clientId}|${applicationSecret}`
+        );
         redis.del(refreshToken);
 
         return res.status(200).send({
           tokenType: 'Bearer',
-          scopes: body.user.scopes,
+          scopes: application!.scopes.map((s) => s.scope),
           expiryDate: addHours(new Date(), 1),
-          oid: body.user.uuid,
+          oid: body.uuid,
           accessToken: newAccessToken,
           refreshToken: newRefreshToken
         });
-      });
-    }
-  );
+      }
+    );
+  });
 });
 
 const expressPort = process.env.EXPRESS_PORT || 5000;
