@@ -11,10 +11,7 @@
 			<div class='inner'>
 					<div class="login-form">
 						<span class="title-text">Sign In</span>
-						<form action='/user/login' method="POST" >
-							<input style="display:none" type="text" name="clientId" value="<%= query.clientId %>" />
-							<input style="display:none" type="text" name="scope" value="<%= query.scope %>" />
-							<input style="display:none" type="text" name="invitation" value="<%= query.invitation %>" />
+						<form action="<%= `/oauth2/v1/${query.clientId}/${query.userCode}/login` %>" method="POST" >
 							<p class="field">
 								<input
 									type="text"

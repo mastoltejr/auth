@@ -1,4 +1,9 @@
-import express, { Application, Request, Response, NextFunction } from 'express';
+import express, {
+  Request,
+  Response,
+  NextFunction,
+  Application as ExpressApplication
+} from 'express';
 import cors from 'cors';
 import { createClient, RedisClient } from 'redis';
 import { genSalt, hash, compare } from 'bcrypt';
@@ -14,7 +19,18 @@ import {
   required,
   strongPassword
 } from './validation';
-import { PrismaClient } from '@prisma/client';
+import { isApplicationScope } from './typeValidation';
+import {
+  Application,
+  ApplicationScopes,
+  PrismaClient,
+  ScopeType,
+  User
+} from '@prisma/client';
+import { stringArray } from './util';
+import { nanoid } from 'nanoid';
+import { addHours, addSeconds } from 'date-fns';
+import jwt from 'jsonwebtoken';
 const prisma = new PrismaClient();
 dotenv.config();
 
@@ -37,7 +53,7 @@ const asyncMiddleware =
     Promise.resolve(fn(req, res, next)).catch(next);
   };
 
-const app: Application = express();
+const app: ExpressApplication = express();
 
 app.use(
   express.urlencoded({
@@ -51,24 +67,26 @@ app.use(express.static(__dirname + '/public'));
 
 app.get('/', (req, res) => res.render('home'));
 
-app.post('/application', async (req, res) => {
-  const {
-    id,
-    clientId,
-    objectId,
-    applicationSecret,
-    ownerId,
-    displayName,
-    inviteOnly,
-    applicationUrl,
-    active,
-    ...application
-  } = req.body;
+//TODO verify token middleware
+app.get('/application', async (req, res) => {
+  const { clientId } = req.query;
 
   let errors = {
-    // email: combine(email, required, isEmail),
-    // password: required(password)
+    clientId: required(clientId)
   };
+
+  if (anyErrors(errors)) {
+    res.send(400).send(errors);
+    return;
+  }
+
+  const app = await prisma.application.findUnique({
+    where: {
+      clientId: String(clientId)
+    }
+  });
+
+  return res.status(201).send(app);
 });
 
 //TODO verify token middleware
@@ -81,7 +99,7 @@ app.put('/application', async (req, res) => {
   };
 
   if (anyErrors(errors)) {
-    res.send(400).send(errors);
+    res.status(400).send(errors);
     return;
   }
 
@@ -91,31 +109,100 @@ app.put('/application', async (req, res) => {
   res.status(201).send(newApp);
 });
 
-app.get('/user/login', (req, res) => {
-  let og = req.query.scope ?? [];
-  const scope = Array.isArray(og) ? (og as string[]) : [String(og)];
+//TODO verify token middleware
+// ownerId must be owner of clientId
 
+interface ApplicationPostRequest extends Request {
+  body: { application: Application; scopes: ApplicationScopes[] };
+}
+
+app.post('/application', async (req: ApplicationPostRequest, res) => {
+  const { application, scopes } = req.body;
+
+  const { create, update } = scopes.reduce<{
+    create: ApplicationScopes[];
+    update: ApplicationScopes[];
+  }>(
+    ({ create, update }, s) => {
+      if (!!s.id) return { create, update: [...update, s] };
+      return { create: [...create, s], update };
+    },
+    { create: [], update: [] }
+  );
+
+  const app = await prisma.application.update({
+    where: {
+      clientId: application.clientId
+    },
+    data: {
+      ...application,
+      scopes: {
+        deleteMany: {
+          clientId: application.clientId,
+          NOT: update.map(({ id }) => ({ id }))
+        },
+        ...(create.length > 0 && {
+          createMany: {
+            data: create
+          }
+        }),
+        ...(update.length > 0 && {
+          updateMany: update.map((s) => ({
+            where: { id: s.id },
+            data: s
+          }))
+        })
+      }
+    }
+  });
+
+  return res.status(200).send(app);
+});
+
+app.get('/oauth2/v1/:clientId/:userCode/login', (req, res) => {
   res.render('login', {
     query: {
-      clientId: req.query.clientId ?? '',
-      scope: scope.join(','),
-      invitation: req.query.invitation ?? ''
+      clientId: req.params.clientId,
+      userCode: req.params.userCode
     },
     errors: {},
     values: {}
   });
 });
 
-app.post('/user/login', async (req, res) => {
+app.post('/oauth2/v1/:clientId/:userCode/login', async (req, res) => {
   const { email, password } = req.body;
+  const { clientId, userCode } = req.params;
   let errors = {
     email: combine(email, required, isEmail),
-    password: required(password)
+    password: required(password),
+    clientId: required(clientId),
+    userCode: required(userCode)
   };
 
   if (anyErrors(errors)) {
-    return res.render('login', { errors, values: { email } });
+    if (errors.clientId !== undefined || errors.userCode !== undefined) {
+      return res
+        .status(400)
+        .send('Application clientId or userCode was not provided');
+    }
+    return res.render('login', {
+      query: { clientId },
+      errors,
+      values: { email }
+    });
   }
+
+  await redis.get(userCode, async (error, value) => {
+    if (error) return res.status(400).send('Error connecting to Auth Server');
+    if (value === null) return res.status(400).send('Login session expired');
+  });
+
+  const validApplication = await prisma.application.findUnique({
+    where: { clientId }
+  });
+  if (!!!validApplication || validApplication.active === false)
+    return res.status(400).send('Not a valid Application');
 
   const matchedUser = await prisma.user.findUnique({
     where: {
@@ -123,27 +210,54 @@ app.post('/user/login', async (req, res) => {
     }
   });
 
-  await compare(password, matchedUser?.password ?? '', function (err, success) {
-    if (success) {
-      // TODO send to application url with correct password
-      const now = new Date();
-      matchedUser!.lastAccess = now;
-      prisma.user.update({
-        where: {
-          id: matchedUser?.id
-        },
-        data: {
-          lastAccess: now
-        }
-      });
-      return res.status(200).send(matchedUser);
-    } else {
-      return res.render('login', {
-        errors: { password: 'Incorrect Password' },
-        values: { email }
-      });
+  await compare(
+    password,
+    matchedUser?.password ?? '',
+    async function (err, success) {
+      if (success) {
+        // TODO send to application url with correct password
+        const now = new Date();
+        matchedUser!.lastAccess = now;
+        prisma.user.update({
+          where: {
+            id: matchedUser?.id
+          },
+          data: {
+            lastAccess: now
+          }
+        });
+        redis.setex(userCode, 60, matchedUser?.uuid ?? '', (error, value) => {
+          if (error) {
+            return res
+              .status(400)
+              .send('Could not set authorizaiton as successful');
+          }
+          redis.setex(
+            `${userCode}-status`,
+            60,
+            'authorization_success',
+            (error, value) => {
+              if (error) {
+                return res
+                  .status(400)
+                  .send('Could not set authorizaiton as successful');
+              }
+
+              return res
+                .status(200)
+                .send('Authorization successful, awaiting login');
+            }
+          );
+        });
+      } else {
+        return res.render('login', {
+          query: { clientId },
+          errors: { password: 'Incorrect Password' },
+          values: { email }
+        });
+      }
     }
-  });
+  );
 });
 
 app.get('/user/signup', (req, res) =>
@@ -183,19 +297,332 @@ app.post('/user/signup', async (req, res, next) => {
     }
   });
 
-  res.render('login', { errors: {}, values: { email: newUser.email } });
+  res.render('login', {
+    query: {},
+    errors: {},
+    values: { email: newUser.email }
+  });
 });
 
 app.post('/oauth2/v1/deviceCode', async (req, res) => {
-  const { clientId, scope } = req.body;
+  const { clientId } = req.body;
   let errors = {
-    clientId: required(clientId),
-    scope: required(scope)
+    clientId: required(clientId)
   };
 
   if (anyErrors(errors)) {
     return res.status(400).send(errors);
   }
+
+  const application = await prisma.application.findUnique({
+    where: { clientId },
+    include: {
+      scopes: true
+    }
+  });
+
+  if (application === null) {
+    return res.status(400).send('Application not found');
+  }
+
+  let userCode: string = '';
+  let userCodeSuccess = false;
+  let retries = 5;
+  while (!userCodeSuccess && retries > 0) {
+    userCode = nanoid(12);
+    userCodeSuccess = await redis.setex(userCode, 600, clientId);
+    retries -= 1;
+  }
+
+  if (!userCodeSuccess) {
+    return res.status(400).send('Could not create userCode');
+  }
+
+  let loginStatusSuccess = false;
+  retries = 5;
+  while (!loginStatusSuccess && retries > 0) {
+    loginStatusSuccess = await redis.setex(
+      `${userCode}-status`,
+      600,
+      'authorization_pending'
+    );
+    retries -= 1;
+  }
+
+  if (!loginStatusSuccess) {
+    return res.status(400).send('Could not create loginStatus');
+  }
+
+  let deviceCode: string = '';
+  let deviceCodeSuccess = false;
+  retries = 5;
+  while (!deviceCodeSuccess && retries > 0) {
+    deviceCode = nanoid(69);
+    deviceCodeSuccess = await redis.setex(deviceCode, 600, userCode);
+    retries -= 1;
+  }
+
+  if (!deviceCodeSuccess) {
+    return res.status(400).send('Could not create deviceCode');
+  }
+
+  return res.status(200).send({
+    clientId,
+    authEndpoint: `http://localhost:5001/oauth2/v1/${clientId}/${userCode}/login`,
+    message: `Application verification successful. Please have the user login at http://localhost:5001/oauth2/v1/${clientId}/${userCode}/login. Poll token endpoint every 20s.`,
+    expiry: addSeconds(new Date(), 300),
+    userCode,
+    interval: 20,
+    deviceCode
+  });
+});
+
+interface TokenRequest extends Request {
+  body: { clientId: Application['clientId']; deviceCode?: string };
+}
+
+type SlimUser = Partial<User> & {
+  oid: User['uuid'];
+  scopes: Array<Pick<ApplicationScopes, 'id' | 'scope'>>;
+};
+
+interface TokenPayload {
+  clientId: string;
+  user: SlimUser;
+}
+
+app.post('/oauth2/v1/token', async (req: TokenRequest, res) => {
+  const { clientId, deviceCode } = req.body;
+  let errors = {
+    clientId: required(clientId),
+    deviceCode: required(deviceCode)
+  };
+
+  if (anyErrors(errors)) {
+    return res.status(400).send(errors);
+  }
+
+  redis.get(String(deviceCode), async (error, userCode) => {
+    if (error) return res.status(400).send('Could not fetch data');
+    console.log('userCode', userCode);
+    if (!!!userCode) return res.status(200).send('expired_token');
+
+    redis.get(`${userCode}-status`, async (error, status) => {
+      if (error) return res.status(400).send('Could not fetch data');
+      if (!!!status) {
+        return res.status(200).send('expired_session');
+      } else if (status !== 'authorization_success') {
+        return res.status(200).send(status);
+      }
+
+      redis.get(userCode, async (error, oid) => {
+        if (error) return res.status(400).send('Could not fetch data');
+        console.log('oid', oid);
+        const user = await prisma.user.findUnique({
+          where: { uuid: String(oid) },
+          include: {
+            scopes: {
+              where: {
+                clientId,
+                status: true
+              },
+              select: {
+                applicationScope: {
+                  select: {
+                    id: true,
+                    scope: true
+                  }
+                }
+              }
+            }
+          }
+        });
+
+        if (!!!user) {
+          return res.status(200).send('expired_token');
+        }
+
+        console.log(user);
+
+        const slimUser = user?.scopes.reduce<SlimUser>(
+          (obj, s) => {
+            obj.scopes.push({
+              id: s.applicationScope.id,
+              scope: s.applicationScope.scope
+            });
+            const base = s.applicationScope.scope.substring(
+              0,
+              s.applicationScope.scope.indexOf('_')
+            );
+            switch (base) {
+              case 'email':
+                obj['email'] = user.email;
+                break;
+              case 'name':
+                obj['firstName'] = user.firstName;
+                obj['lastName'] = user.lastName;
+                break;
+              case 'phone':
+                obj['phone'] = user.phone;
+                break;
+              case 'address':
+                obj['address'] = user.address;
+                obj['address2'] = user.address2;
+                obj['city'] = user.city;
+                obj['state'] = user.state;
+                obj['zip'] = user.zip;
+                break;
+              case 'birthday':
+                obj['birthday'] = user.birthday;
+                break;
+              case 'profile':
+                obj['email'] = user.email;
+                obj['firstName'] = user.firstName;
+                obj['lastName'] = user.lastName;
+                obj['phone'] = user.phone;
+                obj['address'] = user.address;
+                obj['address2'] = user.address2;
+                obj['city'] = user.city;
+                obj['state'] = user.state;
+                obj['zip'] = user.zip;
+                obj['birthday'] = user.birthday;
+                obj['avatar'] = user.avatar;
+                break;
+              default:
+                break;
+            }
+            return obj;
+          },
+          { oid: user.uuid, scopes: [] }
+        );
+
+        console.log('slimUser', slimUser);
+        const application = await prisma.application.findUnique({
+          where: { clientId },
+          select: {
+            applicationSecret: true,
+            objectId: true,
+            scopes: true
+          }
+        });
+        if (!!application) {
+          const { applicationSecret, objectId, scopes } = application;
+
+          const accessToken = jwt.sign(
+            { clientId, user: slimUser },
+            applicationSecret,
+            {
+              issuer: 'https://auth.stolte.us',
+              expiresIn: '1h',
+              audience: clientId
+            }
+          );
+
+          redis.setex(accessToken, 3600, '1');
+
+          const refreshToken = jwt.sign(
+            { clientId, user: slimUser },
+            String(process.env['AUTH_SECRET']),
+            {
+              issuer: 'https://auth.stolte.us',
+              expiresIn: '6h',
+              audience: clientId
+            }
+          );
+
+          redis.setex(refreshToken, 3600 * 6, '1');
+          redis.del(String(deviceCode));
+
+          return res.status(200).send({
+            tokenType: 'Bearer',
+            scopes,
+            expiryDate: addHours(new Date(), 1),
+            oid,
+            accessToken,
+            refreshToken
+          });
+        }
+      });
+    });
+  });
+});
+
+interface RefreshRequest extends Request {
+  body: { clientId: string; refreshToken: string };
+}
+
+app.post('/oauth2/v1/refresh', async (req: RefreshRequest, res) => {
+  const { clientId, refreshToken } = req.body;
+
+  let errors = {
+    clientId: required(clientId),
+    refreshToken: required(refreshToken)
+  };
+
+  if (anyErrors(errors)) {
+    return res.status(400).send(errors);
+  }
+
+  const application = await prisma.application.findUnique({
+    where: { clientId }
+  });
+
+  if (!!!application) return res.status(200).send('Invalid Application');
+
+  jwt.verify(
+    refreshToken,
+    String(process.env['AUTH_SECRET']),
+    {
+      issuer: 'https://auth.stolte.us',
+      audience: clientId
+    },
+    (error, payload) => {
+      if (error !== null)
+        return res
+          .status(401)
+          .send({ error: error.name, message: error.message });
+      if (payload === undefined) return res.status(400).send('Invalid Token');
+      const body = payload as TokenPayload;
+      if (body.clientId !== clientId)
+        return res.status(400).send('Incorrect Application');
+
+      redis.get(refreshToken, async (error, value) => {
+        if (error) return res.status(400).send('Could not fetch data');
+        if (value !== '1')
+          return res.status(200).send('Token has been revoked');
+
+        const newAccessToken = jwt.sign(body, application.applicationSecret, {
+          issuer: 'https://auth.stolte.us',
+          expiresIn: '1h',
+          audience: clientId
+        });
+
+        redis.setex(newAccessToken, 3600, '1');
+
+        const newRefreshToken = jwt.sign(
+          body,
+          String(process.env['AUTH_SECRET']),
+          {
+            issuer: 'https://auth.stolte.us',
+            expiresIn: '6h',
+            audience: clientId
+          }
+        );
+
+        redis.setex(newRefreshToken, 3600 * 6, '1');
+        redis.del(refreshToken);
+
+        return res.status(200).send({
+          tokenType: 'Bearer',
+          scopes: body.user.scopes,
+          expiryDate: addHours(new Date(), 1),
+          oid: body.user.uuid,
+          accessToken: newAccessToken,
+          refreshToken: newRefreshToken
+        });
+      });
+    }
+  );
 });
 
 const expressPort = process.env.EXPRESS_PORT || 5000;
