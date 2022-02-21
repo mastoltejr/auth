@@ -1,0 +1,93 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// prisma migrate dev --name added_job_title
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           Int                     @id @default(autoincrement())
+  uuid         String                  @unique @default(uuid())
+  email        String                  @unique
+  password     String
+  firstName    String?
+  lastName     String?
+  phone        String?
+  address      String?
+  address2     String?
+  city         String?
+  state        String?                 @db.VarChar(2)
+  zip          Int?
+  birthday     DateTime?
+  avatar       String?
+  createdAt    DateTime                @default(now())
+  lastAccess   DateTime                @updatedAt
+  active       Boolean                 @default(true)
+  applications Application[]
+  scopes       UserApplicationScopes[]
+}
+
+model Application {
+  id                  Int                     @id @default(autoincrement())
+  clientId            String                  @unique @default(uuid())
+  objectId            String                  @unique @default(uuid())
+  applicationSecret   String                  @unique @default(uuid())
+  ownerId             Int
+  displayName         String
+  description         String?
+  inviteOnly          Boolean                 @default(true)
+  applicationUrl      String                  @default("http://localhost:3000")
+  termsOfServiceUrl   String?
+  privacyStatementUrl String?
+  createdAt           DateTime                @default(now())
+  active              Boolean                 @default(true)
+  owner               User                    @relation(fields: [ownerId], references: [id])
+  scopes              ApplicationScopes[]
+  users               UserApplicationScopes[]
+}
+
+model ApplicationScopes {
+  id          Int                     @id @default(autoincrement())
+  clientId    String
+  scope       ScopeType
+  required    Boolean                 @default(false)
+  createdAt   DateTime                @default(now())
+  application Application             @relation(fields: [clientId], references: [clientId])
+  userScopes  UserApplicationScopes[]
+}
+
+enum ScopeType {
+  email_read
+  email_readwrite
+  email_notify
+  name_read
+  name_readwrite
+  phone_read
+  phone_readwrite
+  phone_notify
+  address_read
+  address_readwrite
+  address_notify
+  birthday_read
+  birthday_readwrite
+  profile_read
+  profile_readwrite
+}
+
+model UserApplicationScopes {
+  id               Int               @id @default(autoincrement())
+  uuid             String
+  clientId         String
+  scopeId          Int
+  status           Boolean           @default(false)
+  updatedAt        DateTime
+  user             User              @relation(fields: [uuid], references: [uuid])
+  application      Application       @relation(fields: [clientId], references: [clientId])
+  applicationScope ApplicationScopes @relation(fields: [scopeId], references: [id])
+}
