@@ -15,7 +15,7 @@ body {
     'Estrangelo Edessa', 'Microsoft Himalaya', 'Microsoft New Tai Lue',
     'Microsoft PhagsPa', 'Microsoft Tai Le', 'Microsoft Yi Baiti',
     'Mongolian Baiti', 'MV Boli', 'Myanmar Text', 'Cambria Math';
-  height: 100vh;
+  height: 100%;
   width: 100vw;
   color: #000;
   background-color: #fff;
@@ -29,7 +29,7 @@ body {
   width: 100%;
   height: 100%;
   /* background: rgb(228, 228, 228); */
-  background: url(/background.svg) no-repeat bottom center fixed;
+  background: white;
   -webkit-background-size: cover;
   -moz-background-size: cover;
   -o-background-size: cover;
@@ -47,12 +47,12 @@ body {
   margin: auto;
   position: relative;
   padding: 16px;
-  width: 90%;
+  width: 100vw;
+  height: 100vh;
   background-color: #fff;
   -webkit-box-shadow: 0 2px 6px rgb(0 0 0 / 20%);
   -moz-box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
   box-shadow: 0 2px 6px rgb(0 0 0 / 20%);
-  border-radius: 4%;
 }
 
 .title-text {
@@ -69,6 +69,13 @@ body {
     'Estrangelo Edessa', 'Microsoft Himalaya', 'Microsoft New Tai Lue',
     'Microsoft PhagsPa', 'Microsoft Tai Le', 'Microsoft Yi Baiti',
     'Mongolian Baiti', 'MV Boli', 'Myanmar Text', 'Cambria Math';
+}
+
+.app-name {
+  color: #33006e;
+  font-size: 1rem;
+  font-weight: 600;
+  padding: 0;
 }
 
 .login-form {
@@ -177,19 +184,78 @@ input:focus + label {
   text-align: center;
 }
 
+details {
+  font-size: 1rem;
+  width: 100%;
+  background: #ffffff;
+  position: relative;
+  border-bottom: 1px solid #e2e8f0;
+}
+details .summary-title {
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+}
+details:hover {
+  cursor: pointer;
+}
+details .summary-content {
+  border-top: 1px solid #e2e8f0;
+  cursor: default;
+  padding: 1em;
+  font-weight: 300;
+  line-height: 1.5;
+}
+details summary {
+  list-style: none;
+  padding: 1em 8px;
+}
+details summary:focus {
+  outline: none;
+}
+details summary:hover .summary-chevron-up svg {
+  opacity: 1;
+}
+details .summary-chevron-up svg {
+  opacity: 0.5;
+}
+details .summary-chevron-up,
+details .summary-chevron-down {
+  pointer-events: none;
+  position: absolute;
+  top: 0.75em;
+  right: 0px;
+  background: #ffffff;
+}
+details .summary-chevron-up svg,
+details .summary-chevron-down svg {
+  display: block;
+}
+details summary::-webkit-details-marker {
+  display: none;
+}
+
 @media (min-width: 600px) {
+  .container {
+    height: 80vh;
+    margin-top: 10vh;
+  }
   .inner {
     margin: auto;
     position: relative;
     max-width: 440px;
     width: calc(100% - 40px);
-    padding: 44px;
+    padding: 24px 48px;
     background-color: #fff;
     -webkit-box-shadow: 0 2px 6px rgb(0 0 0 / 20%);
     -moz-box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
     box-shadow: 0 2px 6px rgb(0 0 0 / 20%);
     min-width: 320px;
     overflow: hidden;
+    max-height: 80vh;
+    overflow-y: auto;
+    height: auto;
   }
 
   .background {

@@ -13,7 +13,7 @@ datasource db {
 
 model User {
   id           Int                     @id @default(autoincrement())
-  uuid         String                  @unique @default(uuid())
+  oid          String                  @unique @default(uuid())
   email        String                  @unique
   password     String
   firstName    String?
@@ -38,7 +38,7 @@ model Application {
   clientId            String                  @unique @default(uuid())
   objectId            String                  @unique @default(uuid())
   applicationSecret   String                  @unique @default(uuid())
-  ownerId             Int
+  ownerId             String
   displayName         String
   description         String?
   inviteOnly          Boolean                 @default(true)
@@ -47,7 +47,7 @@ model Application {
   privacyStatementUrl String?
   createdAt           DateTime                @default(now())
   active              Boolean                 @default(true)
-  owner               User                    @relation(fields: [ownerId], references: [id])
+  owner               User                    @relation(fields: [ownerId], references: [oid])
   scopes              ApplicationScopes[]
   users               UserApplicationScopes[]
 }
@@ -60,6 +60,7 @@ model ApplicationScopes {
   createdAt   DateTime                @default(now())
   application Application             @relation(fields: [clientId], references: [clientId])
   userScopes  UserApplicationScopes[]
+  info        ApplicationScopeInfo    @relation(fields: [scope], references: [scope])
 }
 
 enum ScopeType {
@@ -80,14 +81,21 @@ enum ScopeType {
   profile_readwrite
 }
 
+model ApplicationScopeInfo {
+  scope       ScopeType           @id
+  summary     String              @db.VarChar(300)
+  description String              @db.VarChar(2000)
+  scopes      ApplicationScopes[]
+}
+
 model UserApplicationScopes {
   id               Int               @id @default(autoincrement())
-  uuid             String
+  oid              String
   clientId         String
   scopeId          Int
   status           Boolean           @default(false)
   updatedAt        DateTime
-  user             User              @relation(fields: [uuid], references: [uuid])
+  user             User              @relation(fields: [oid], references: [oid])
   application      Application       @relation(fields: [clientId], references: [clientId])
   applicationScope ApplicationScopes @relation(fields: [scopeId], references: [id])
 }

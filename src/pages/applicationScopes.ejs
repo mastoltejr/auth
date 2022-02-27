@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<title>Home Page</title>
+		<link rel="stylesheet" href="/login.css">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	</head>
+	<body>
+		<div class='background'></div>
+		<div class='container'>
+			<div class='inner'>
+				<form action="<%= `/oauth2/v1/${query.clientId}/${query.userCode}/acceptScopes` %>" method="POST" class="login-form" style="display: flex;flex-direction: column;max-height: 100%;">
+					<div>
+						<p><%= query.user %></p>
+						<span class="title-text">Permissions Requested</span><br />
+						<span class="app-name">by <%= query.displayName %></span>
+						<% if(!!query.description){ %> <p><%= query.description %></p> <% } %>
+						<% if(query.scopes.length > 0){ %>
+							<p>This app would like to:</p>
+						<% } %>
+					</div>
+					<div style="margin: 1em 0px;overflow: scroll;">
+						<% for(scope of query.scopes) { %>
+							<details>
+								<summary>
+									<span class="summary-title"><%= scope.info.summary %></span>
+									<div class="summary-chevron-up">
+										<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-chevron-down"><polyline points="6 9 12 15 18 9"></polyline></svg>
+									</div>
+								</summary>
+								<div class="summary-content"><%= scope.info.description %></div>
+								<div class="summary-chevron-down">
+									<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-chevron-up"><polyline points="18 15 12 9 6 15"></polyline></svg>
+							</details>
+						<% } %>
+					</div>
+					<div>
+						<input type="submit" value="Accept" class="btn" />
+					</div>
+				</form>
+			</div>
+		</div>
+	</body>
+</html>
