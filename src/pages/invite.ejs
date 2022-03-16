@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en" style="background: black">
+	<head>
+		<title>Invitation</title>
+		<link rel="stylesheet" href="/login.css">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	</head>
+	<body>
+		<div class='background'></div>
+		<div class='container'>
+			<div class='inner'>
+					<div class="login-form">
+						<span class="title-text">Sign Up</span>
+						<form action='/user/signup' method="POST" >
+							<p class="field">
+								<input
+									type="email"
+									name="email"
+									placeholder="Email"
+									required
+									value="<%= values.email ?? '' %>"
+								/><label for="email">Email</label>
+								<span><%= errors.email ?? '' %></span>
+							</p>
+							<p class="field">
+								<input
+									type="password"
+									name="password"
+									placeholder="Password"
+									required
+								/><label for="password">Password</label>
+								<span><%= errors.password ?? '' %></span>
+							</p>
+							<p class="field">
+								<input
+									type="password"
+									name="password2"
+									placeholder="Repeat Password"
+									required
+								/><label for="password2">Repeat Password</label>
+								<span><%= errors.password2 ?? '' %></span>
+							</p>
+							<p>
+								<input
+									class="btn"
+									type="submit"
+									value="Next"
+									style="grid-column: 1 / 3"
+								/>
+							</p>
+							<p class='bottom-grid' style="grid-template-columns: 1fr;">
+								<a href="login">Back to Login</a>
+							</p>
+						</form>
+					</div>
+				</div>
+			</div>
+		</div>
+	</body>
+</html>

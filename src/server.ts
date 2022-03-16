@@ -7,7 +7,7 @@ import express, {
   application
 } from 'express';
 import cors from 'cors';
-import { createClient, RedisClient } from 'redis';
+import { createClient } from 'redis';
 import { genSalt, hash, compare } from 'bcrypt';
 import dotenv from 'dotenv';
 import { join } from 'path';
@@ -35,18 +35,17 @@ import { splitToken } from './util';
 const prisma = new PrismaClient();
 dotenv.config();
 
-let redis: RedisClient;
-
-redis = createClient(6379, process.env['REDIS_HOST'], {
-  password: process.env['REDIS_PWD'],
-  db: process.env['REDIS_DB']
+let redis = createClient({
+  url: `redis://:${process.env['REDIS_PWD']}@${process.env['REDIS_HOST']}:6379/${process.env['REDIS_DB']}`
 });
 
 redis.on('connection', () => console.log('Redis is connected'));
-redis.on('error', (err) => {
+redis.on('error', (err: any) => {
   console.log('Redis errored out', err);
   process.exit();
 });
+
+redis.connect();
 
 const isProductionEnv = false;
 const endpoint = isProductionEnv
@@ -77,20 +76,12 @@ const cookieMiddleware: RequestHandler = async (req, res, next) => {
   const accessToken = accessTokenBase + '.' + accessTokenSecret;
   const refreshToken = refreshTokenBase + '.' + refreshTokenSecret;
 
-  await redis.get(accessToken, async (error, value) => {
-    let tokenType = 'access',
-      clientId = '',
-      applicationSecret = '';
-    if (error || value === null) {
-      await redis.get(refreshToken, async (error, value) => {
-        if (error || value === null) {
-          return res.status(401).send('Invalid or expired Token');
-        }
-        [tokenType, clientId, applicationSecret] = value.split('|');
-      });
-    } else {
-      [tokenType, clientId, applicationSecret] = value.split('|');
-    }
+  try {
+    let value =
+      (await redis.get(accessToken)) ?? (await redis.get(refreshToken));
+    if (value === null) return res.status(401).send('Invalid or expired token');
+
+    const [tokenType, clientId, applicationSecret] = value.split('|');
 
     await jwt.verify(
       tokenType === 'access' ? accessToken : refreshToken,
@@ -123,7 +114,7 @@ const cookieMiddleware: RequestHandler = async (req, res, next) => {
 
           const newAccessTokenSplit = splitToken(newAccessToken);
 
-          redis.setex(
+          redis.setEx(
             newAccessToken,
             3600,
             `access|${clientId}|${applicationSecret}`
@@ -142,7 +133,7 @@ const cookieMiddleware: RequestHandler = async (req, res, next) => {
 
           const newRefreshTokenSplit = splitToken(newRefreshToken);
 
-          redis.setex(
+          redis.setEx(
             newRefreshToken,
             3600 * 6,
             `refresh|${clientId}|${applicationSecret}`
@@ -173,7 +164,9 @@ const cookieMiddleware: RequestHandler = async (req, res, next) => {
         next();
       }
     );
-  });
+  } catch {
+    res.status(400).send('Could not connect to database');
+  }
 };
 
 const limitToDevMiddleware: RequestHandler = (req, res, next) => {
@@ -565,50 +558,44 @@ app.post('/oauth2/v1/:clientId/:userCode/login', logger, async (req, res) => {
     });
   }
 
-  await redis.get(userCode, async (error, value) => {
-    if (error) return res.status(400).send('Error connecting to Auth Server');
+  try {
+    const value = await redis.get(userCode);
     if (value === null) return res.status(400).send('Login session expired');
-  });
 
-  const validApplication = await prisma.application.findUnique({
-    where: { clientId },
-    include: {
-      scopes: {
-        include: {
-          info: true
-        }
-      }
-    }
-  });
-
-  if (validApplication === null || validApplication.active === false)
-    return res.status(400).send('Not a valid Application');
-
-  const matchedUser = await prisma.user.findUnique({
-    where: {
-      email
-    },
-    include: {
-      scopes: {
-        where: {
-          clientId: validApplication.clientId
-        }
-      }
-    }
-  });
-
-  await compare(
-    password,
-    matchedUser?.password ?? '',
-    async function (err, success) {
-      if (success) {
-        // User has logged in already
-        redis.setex(userCode, 600, matchedUser?.oid ?? '', (error, value) => {
-          if (error) {
-            return res
-              .status(400)
-              .send('Could not set authorizaiton as successful');
+    const validApplication = await prisma.application.findUnique({
+      where: { clientId },
+      include: {
+        scopes: {
+          include: {
+            info: true
           }
+        }
+      }
+    });
+
+    if (validApplication === null || validApplication.active === false)
+      return res.status(400).send('Not a valid Application');
+
+    const matchedUser = await prisma.user.findUnique({
+      where: {
+        email
+      },
+      include: {
+        scopes: {
+          where: {
+            clientId: validApplication.clientId
+          }
+        }
+      }
+    });
+
+    await compare(
+      password,
+      matchedUser?.password ?? '',
+      async function (err, success) {
+        if (success) {
+          // User has logged in already
+          await redis.setEx(userCode, 600, matchedUser?.oid ?? '');
 
           const confirmedUser = matchedUser!;
 
@@ -647,32 +634,23 @@ app.post('/oauth2/v1/:clientId/:userCode/login', logger, async (req, res) => {
             }
           });
 
-          redis.setex(
-            `${userCode}-status`,
-            60,
-            'authorization_success',
-            (error, value) => {
-              if (error) {
-                return res
-                  .status(400)
-                  .send('Could not set authorizaiton as successful');
-              }
+          await redis.setEx(`${userCode}-status`, 60, 'authorization_success');
 
-              return res
-                .status(200)
-                .send('Authorization successful, awaiting login');
-            }
-          );
-        });
-      } else {
-        return res.render('login', {
-          query: { clientId, userCode },
-          errors: { password: 'Incorrect Password' },
-          values: { email }
-        });
+          return res
+            .status(200)
+            .send('Authorization successful, awaiting login');
+        } else {
+          return res.render('login', {
+            query: { clientId, userCode },
+            errors: { password: 'Incorrect Password' },
+            values: { email }
+          });
+        }
       }
-    }
-  );
+    );
+  } catch {
+    return res.status(400).send('Could not set authorizaiton as successful');
+  }
 });
 
 app.post(
@@ -705,8 +683,8 @@ app.post(
     if (validApplication === null || validApplication.active === false)
       return res.status(400).send('Not a valid Application');
 
-    await redis.get(userCode, async (error, value) => {
-      if (error) return res.status(400).send('Error connecting to Auth Server');
+    try {
+      const value = await redis.get(userCode);
       if (value === null) return res.status(400).send('Login session expired');
 
       const now = new Date();
@@ -728,32 +706,44 @@ app.post(
       });
 
       // TODO User has logged in already
-      redis.setex(userCode, 600, matchedUser?.oid ?? '', (error, value) => {
-        if (error) {
-          return res
-            .status(400)
-            .send('Could not set authorizaiton as successful');
-        }
-        redis.setex(
-          `${userCode}-status`,
-          60,
-          'authorization_success',
-          (error, value) => {
-            if (error) {
-              return res
-                .status(400)
-                .send('Could not set authorizaiton as successful');
-            }
+      await redis.setEx(userCode, 600, matchedUser?.oid ?? '');
+      await redis.setEx(`${userCode}-status`, 60, 'authorization_success');
 
-            return res
-              .status(200)
-              .send('Authorization successful, awaiting login');
-          }
-        );
-      });
-    });
+      return res.status(200).send('Authorization successful, awaiting login');
+    } catch {
+      return res.status(400).send('Could not set authorizaiton as successful');
+    }
   }
 );
+
+app.get('/oauth2/v1/:invitation/invite', logger, async (req, res) => {
+  const { inviation } = req.params;
+
+  try {
+    const value = await redis.get(inviation);
+    if (value === null) return res.status(200).send('Invitation is not valid');
+
+    const [clientId, oid] = value.split('|');
+
+    const application = prisma.application.findUnique({ where: { clientId } });
+    if (application === null)
+      return res.status(200).send('Application not found');
+
+    const user = prisma.user.findUnique({ where: { oid } });
+
+    return res.render('invite', {
+      query: {
+        user,
+        clientId: req.params.clientId,
+        userCode: req.params.userCode
+      },
+      errors: {},
+      values: {}
+    });
+  } catch {
+    return res.status(400).send('Invitation unsuccessfull');
+  }
+});
 
 app.post(
   '/oauth2/v1/logout',
@@ -797,7 +787,10 @@ app.post('/oauth2/v1/deviceCode', logger, async (req, res) => {
   let retries = 5;
   while (!userCodeSuccess && retries > 0) {
     userCode = nanoid(12);
-    userCodeSuccess = await redis.setex(userCode, 600, clientId);
+    userCodeSuccess = await redis
+      .setEx(userCode, 600, clientId)
+      .then(() => true)
+      .catch(() => false);
     retries -= 1;
   }
 
@@ -808,11 +801,10 @@ app.post('/oauth2/v1/deviceCode', logger, async (req, res) => {
   let loginStatusSuccess = false;
   retries = 5;
   while (!loginStatusSuccess && retries > 0) {
-    loginStatusSuccess = await redis.setex(
-      `${userCode}-status`,
-      600,
-      'authorization_pending'
-    );
+    loginStatusSuccess = await redis
+      .setEx(`${userCode}-status`, 600, 'authorization_pending')
+      .then(() => true)
+      .catch(() => false);
     retries -= 1;
   }
 
@@ -825,7 +817,10 @@ app.post('/oauth2/v1/deviceCode', logger, async (req, res) => {
   retries = 5;
   while (!deviceCodeSuccess && retries > 0) {
     deviceCode = nanoid(69);
-    deviceCodeSuccess = await redis.setex(deviceCode, 600, userCode);
+    deviceCodeSuccess = await redis
+      .setEx(deviceCode, 600, userCode)
+      .then(() => true)
+      .catch(() => false);
     retries -= 1;
   }
 
@@ -859,192 +854,186 @@ app.post('/oauth2/v1/token', logger, async (req: TokenRequest, res) => {
     return res.status(400).send(errors);
   }
 
-  redis.get(String(deviceCode), async (error, userCode) => {
-    if (error) return res.status(400).send('Could not fetch data');
+  try {
+    const userCode = await redis.get(String(deviceCode));
+    if (userCode === null) return res.status(200).send('expired_token');
 
-    if (!!!userCode) return res.status(200).send('expired_token');
+    await redis.get(`${userCode}-status`).then((value) => {
+      if (value === null) res.status(200).send('expired_session');
+    });
 
-    redis.get(`${userCode}-status`, async (error, status) => {
-      if (error) return res.status(400).send('Could not fetch data');
-      if (!!!status) {
-        return res.status(200).send('expired_session');
-      } else if (status !== 'authorization_success') {
-        return res.status(200).send(status);
-      }
+    const oid = redis.get(userCode);
+    if (oid === null) {
+      res.status(200).send('expired_token');
+      return;
+    }
 
-      redis.get(userCode, async (error, oid) => {
-        if (error) return res.status(400).send('Could not fetch data');
-
-        const user = await prisma.user.findUnique({
-          where: { oid: String(oid) },
-          include: {
-            scopes: {
-              where: {
-                clientId,
-                status: true
-              },
+    const user = await prisma.user.findUnique({
+      where: { oid: String(oid) },
+      include: {
+        scopes: {
+          where: {
+            clientId,
+            status: true
+          },
+          select: {
+            applicationScope: {
               select: {
-                applicationScope: {
-                  select: {
-                    id: true,
-                    scope: true
-                  }
-                }
+                id: true,
+                scope: true
               }
             }
           }
-        });
-
-        if (!!!user) {
-          return res.status(200).send('expired_token');
         }
-
-        const slimUser = user?.scopes.reduce<SlimUser>(
-          (obj, s) => {
-            const base = s.applicationScope.scope.substring(
-              0,
-              s.applicationScope.scope.indexOf('_')
-            );
-            switch (base) {
-              case 'email':
-                obj['email'] = user.email;
-                break;
-              case 'name':
-                obj['firstName'] = user.firstName;
-                obj['lastName'] = user.lastName;
-                break;
-              case 'phone':
-                obj['phone'] = user.phone;
-                break;
-              case 'address':
-                obj['address'] = user.address;
-                obj['address2'] = user.address2;
-                obj['city'] = user.city;
-                obj['state'] = user.state;
-                obj['zip'] = user.zip;
-                break;
-              case 'birthday':
-                obj['birthday'] = user.birthday;
-                break;
-              case 'profile':
-                obj['email'] = user.email;
-                obj['firstName'] = user.firstName;
-                obj['lastName'] = user.lastName;
-                obj['phone'] = user.phone;
-                obj['address'] = user.address;
-                obj['address2'] = user.address2;
-                obj['city'] = user.city;
-                obj['state'] = user.state;
-                obj['zip'] = user.zip;
-                obj['birthday'] = user.birthday;
-                obj['avatar'] = user.avatar;
-                break;
-              default:
-                break;
-            }
-            return obj;
-          },
-          { oid: user.oid }
-        );
-
-        const application = await prisma.application.findUnique({
-          where: { clientId },
-          select: {
-            applicationSecret: true,
-            objectId: true,
-            scopes: true
-          }
-        });
-        if (!!application) {
-          const { applicationSecret, scopes } = application;
-
-          const accessToken = jwt.sign(
-            { clientId, user: slimUser },
-            applicationSecret,
-            {
-              issuer: process.env['AUTH_ISSUER'],
-              expiresIn: '1h',
-              audience: clientId
-            }
-          );
-
-          const accessTokenSplit = splitToken(accessToken);
-
-          redis.setex(
-            accessToken,
-            3600,
-            `access|${clientId}|${applicationSecret}`
-          );
-
-          redis.setex(
-            `${slimUser.oid}|${clientId}|access`,
-            3600 * 6,
-            `${accessToken}`
-          );
-
-          const refreshToken = jwt.sign(
-            { clientId, user: slimUser },
-            String(process.env['AUTH_SECRET']),
-            {
-              issuer: process.env['AUTH_ISSUER'],
-              expiresIn: '6h',
-              audience: clientId
-            }
-          );
-
-          const refreshTokenSplit = splitToken(refreshToken);
-
-          redis.setex(
-            refreshToken,
-            3600 * 6,
-            `refresh|${clientId}|${applicationSecret}`
-          );
-          redis.del(String(deviceCode));
-
-          redis.setex(
-            `${slimUser.oid}|${clientId}|refresh`,
-            3600 * 6,
-            `${refreshToken}`
-          );
-
-          const loginToken = jwt.sign({ user: slimUser }, applicationSecret, {
-            issuer: process.env['AUTH_ISSUER'],
-            expiresIn: '1h',
-            audience: clientId
-          });
-
-          return res
-            .cookie('accessToken', accessTokenSplit[0], {
-              sameSite: isProductionEnv,
-              secure: isProductionEnv
-            })
-            .cookie('accessTokenSecret', accessTokenSplit[1], {
-              httpOnly: isProductionEnv,
-              sameSite: isProductionEnv,
-              secure: isProductionEnv
-            })
-            .cookie('refreshToken', refreshTokenSplit[0], {
-              sameSite: isProductionEnv,
-              secure: isProductionEnv
-            })
-            .cookie('refreshTokenSecret', refreshTokenSplit[1], {
-              httpOnly: isProductionEnv,
-              sameSite: isProductionEnv,
-              secure: isProductionEnv
-            })
-            .status(200)
-            .send({
-              tokenType: 'Bearer',
-              scopes: scopes.map((s) => s.scope),
-              user: slimUser,
-              expiryDate: addHours(new Date(), 1),
-              loginToken,
-              oid
-            });
-        }
-      });
+      }
     });
-  });
+
+    if (!!!user) {
+      return;
+    }
+
+    const slimUser = user?.scopes.reduce<SlimUser>(
+      (obj, s) => {
+        const base = s.applicationScope.scope.substring(
+          0,
+          s.applicationScope.scope.indexOf('_')
+        );
+        switch (base) {
+          case 'email':
+            obj['email'] = user.email;
+            break;
+          case 'name':
+            obj['firstName'] = user.firstName;
+            obj['lastName'] = user.lastName;
+            break;
+          case 'phone':
+            obj['phone'] = user.phone;
+            break;
+          case 'address':
+            obj['address'] = user.address;
+            obj['address2'] = user.address2;
+            obj['city'] = user.city;
+            obj['state'] = user.state;
+            obj['zip'] = user.zip;
+            break;
+          case 'birthday':
+            obj['birthday'] = user.birthday;
+            break;
+          case 'profile':
+            obj['email'] = user.email;
+            obj['firstName'] = user.firstName;
+            obj['lastName'] = user.lastName;
+            obj['phone'] = user.phone;
+            obj['address'] = user.address;
+            obj['address2'] = user.address2;
+            obj['city'] = user.city;
+            obj['state'] = user.state;
+            obj['zip'] = user.zip;
+            obj['birthday'] = user.birthday;
+            obj['avatar'] = user.avatar;
+            break;
+          default:
+            break;
+        }
+        return obj;
+      },
+      { oid: user.oid }
+    );
+
+    const application = await prisma.application.findUnique({
+      where: { clientId },
+      select: {
+        applicationSecret: true,
+        objectId: true,
+        scopes: true
+      }
+    });
+    if (!!application) {
+      const { applicationSecret, scopes } = application;
+
+      const accessToken = jwt.sign(
+        { clientId, user: slimUser },
+        applicationSecret,
+        {
+          issuer: process.env['AUTH_ISSUER'],
+          expiresIn: '1h',
+          audience: clientId
+        }
+      );
+
+      const accessTokenSplit = splitToken(accessToken);
+
+      redis.setEx(accessToken, 3600, `access|${clientId}|${applicationSecret}`);
+
+      redis.setEx(
+        `${slimUser.oid}|${clientId}|access`,
+        3600 * 6,
+        `${accessToken}`
+      );
+
+      const refreshToken = jwt.sign(
+        { clientId, user: slimUser },
+        String(process.env['AUTH_SECRET']),
+        {
+          issuer: process.env['AUTH_ISSUER'],
+          expiresIn: '6h',
+          audience: clientId
+        }
+      );
+
+      const refreshTokenSplit = splitToken(refreshToken);
+
+      redis.setEx(
+        refreshToken,
+        3600 * 6,
+        `refresh|${clientId}|${applicationSecret}`
+      );
+      redis.del(String(deviceCode));
+
+      redis.setEx(
+        `${slimUser.oid}|${clientId}|refresh`,
+        3600 * 6,
+        `${refreshToken}`
+      );
+
+      const loginToken = jwt.sign({ user: slimUser }, applicationSecret, {
+        issuer: process.env['AUTH_ISSUER'],
+        expiresIn: '1h',
+        audience: clientId
+      });
+
+      return res
+        .cookie('accessToken', accessTokenSplit[0], {
+          sameSite: isProductionEnv,
+          secure: isProductionEnv
+        })
+        .cookie('accessTokenSecret', accessTokenSplit[1], {
+          httpOnly: isProductionEnv,
+          sameSite: isProductionEnv,
+          secure: isProductionEnv
+        })
+        .cookie('refreshToken', refreshTokenSplit[0], {
+          sameSite: isProductionEnv,
+          secure: isProductionEnv
+        })
+        .cookie('refreshTokenSecret', refreshTokenSplit[1], {
+          httpOnly: isProductionEnv,
+          sameSite: isProductionEnv,
+          secure: isProductionEnv
+        })
+        .status(200)
+        .send({
+          tokenType: 'Bearer',
+          scopes: scopes.map((s) => s.scope),
+          user: slimUser,
+          expiryDate: addHours(new Date(), 1),
+          loginToken,
+          oid
+        });
+    }
+  } catch {
+    res.status(400).send('Could not fetch data');
+  }
 });
 
 const expressPort = process.env.EXPRESS_PORT || 5000;
